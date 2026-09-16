@@ -14,20 +14,35 @@ const SYSTEM_PROMPT =
   process.env.SYSTEM_PROMPT ||
   "You are a helpful assistant chatting over WhatsApp. Keep replies concise and conversational.";
 
+console.log("=== Bridge starting ===");
+console.log("WAHA_URL set:", !!WAHA_URL, WAHA_URL ? `(${WAHA_URL})` : "");
+console.log("WAHA_API_KEY set:", !!WAHA_API_KEY);
+console.log("ANTHROPIC_API_KEY set:", !!ANTHROPIC_API_KEY, ANTHROPIC_API_KEY ? `(starts with ${ANTHROPIC_API_KEY.slice(0, 7)}...)` : "");
+console.log("ANTHROPIC_MODEL:", ANTHROPIC_MODEL);
+console.log("WAHA_SESSION:", WAHA_SESSION);
+
 if (!WAHA_URL || !ANTHROPIC_API_KEY) {
-  console.error("Missing required env vars: WAHA_URL and/or ANTHROPIC_API_KEY");
+  console.error("!!! Missing required env vars: WAHA_URL and/or ANTHROPIC_API_KEY !!!");
 }
 
+// Catch anything that would otherwise crash silently
+process.on("unhandledRejection", (reason) => {
+  console.error("UNHANDLED REJECTION:", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("UNCAUGHT EXCEPTION:", err);
+});
+
 // Very simple in-memory per-chat history. Resets on restart/redeploy.
-// Fine for personal use; swap for a real DB if you want it to persist.
 const history = new Map();
 const MAX_TURNS = 20;
 
 app.get("/", (req, res) => res.send("WAHA-Claude bridge is running"));
 
 app.post("/webhook", async (req, res) => {
-  // Ack immediately — WAHA expects a fast response and will retry otherwise
-  res.sendStatus(200);
+  res.sendStatus(200); // ack immediately — WAHA expects a fast response
+
+  console.log(">>> Webhook hit. Event type:", req.body?.event);
 
   if (WEBHOOK_SECRET) {
     const provided = req.headers["x-webhook-secret"];
@@ -39,20 +54,34 @@ app.post("/webhook", async (req, res) => {
 
   try {
     const event = req.body;
-    if (event?.event !== "message") return;
+    if (event?.event !== "message") {
+      console.log("Ignoring non-message event:", event?.event);
+      return;
+    }
 
     const msg = event.payload;
-    if (!msg || msg.fromMe) return; // ignore messages you send yourself
+    if (!msg) {
+      console.log("No payload on message event");
+      return;
+    }
+    if (msg.fromMe) {
+      console.log("Ignoring own outgoing message");
+      return;
+    }
 
     const chatId = msg.from;
     const text = msg.body;
-    if (!text) return; // ignore non-text messages (images, voice, etc.) for now
+    if (!text) {
+      console.log("No text body (media/other type), ignoring. Payload keys:", Object.keys(msg));
+      return;
+    }
 
     console.log(`Incoming from ${chatId}: ${text}`);
 
     const past = history.get(chatId) || [];
     past.push({ role: "user", content: text });
 
+    console.log("Calling Anthropic API...");
     const claudeRes = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -68,6 +97,8 @@ app.post("/webhook", async (req, res) => {
       }),
     });
 
+    console.log("Anthropic response status:", claudeRes.status);
+
     if (!claudeRes.ok) {
       const errText = await claudeRes.text();
       console.error("Anthropic API error:", claudeRes.status, errText);
@@ -76,6 +107,8 @@ app.post("/webhook", async (req, res) => {
     }
 
     const data = await claudeRes.json();
+    console.log("Anthropic response received, content blocks:", data.content?.length);
+
     const reply =
       data.content
         ?.filter((b) => b.type === "text")
@@ -83,26 +116,38 @@ app.post("/webhook", async (req, res) => {
         .join("\n")
         .trim() || "Sorry, I couldn't generate a reply.";
 
+    console.log("Reply text:", reply);
+
     past.push({ role: "assistant", content: reply });
     history.set(chatId, past.slice(-MAX_TURNS));
 
+    console.log("Sending reply back via WAHA...");
     await sendText(chatId, reply);
+    console.log("Done — sendText call completed.");
   } catch (err) {
     console.error("Error handling webhook:", err);
   }
 });
 
 async function sendText(chatId, text) {
-  const res = await fetch(`${WAHA_URL}/api/sendText`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      ...(WAHA_API_KEY ? { "X-Api-Key": WAHA_API_KEY } : {}),
-    },
-    body: JSON.stringify({ session: WAHA_SESSION, chatId, text }),
-  });
-  if (!res.ok) {
-    console.error("WAHA sendText error:", res.status, await res.text());
+  console.log("sendText -> POST", `${WAHA_URL}/api/sendText`, "chatId:", chatId);
+  try {
+    const res = await fetch(`${WAHA_URL}/api/sendText`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(WAHA_API_KEY ? { "X-Api-Key": WAHA_API_KEY } : {}),
+      },
+      body: JSON.stringify({ session: WAHA_SESSION, chatId, text }),
+    });
+    console.log("WAHA sendText response status:", res.status);
+    if (!res.ok) {
+      console.error("WAHA sendText error:", res.status, await res.text());
+    } else {
+      console.log("WAHA sendText succeeded.");
+    }
+  } catch (err) {
+    console.error("WAHA sendText threw an exception:", err);
   }
 }
 
