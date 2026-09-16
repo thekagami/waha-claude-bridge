@@ -14,6 +14,14 @@ const SYSTEM_PROMPT =
   process.env.SYSTEM_PROMPT ||
   "You are a helpful assistant chatting over WhatsApp. Keep replies concise and conversational.";
 
+// Optional: comma-separated list of WhatsApp chat IDs allowed to use the bot,
+// e.g. "971501234567@c.us,971501234567@lid". Leave empty/unset to allow everyone.
+const ALLOWED_SENDERS = (process.env.ALLOWED_SENDERS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+console.log("ALLOWED_SENDERS:", ALLOWED_SENDERS.length ? ALLOWED_SENDERS : "(none set — allowing everyone)");
+
 console.log("=== Bridge starting ===");
 console.log("WAHA_URL set:", !!WAHA_URL, WAHA_URL ? `(${WAHA_URL})` : "");
 console.log("WAHA_API_KEY set:", !!WAHA_API_KEY);
@@ -77,6 +85,11 @@ app.post("/webhook", async (req, res) => {
     }
 
     console.log(`Incoming from ${chatId}: ${text}`);
+
+    if (ALLOWED_SENDERS.length > 0 && !ALLOWED_SENDERS.includes(chatId)) {
+      console.log(`Ignoring message from unauthorized sender: ${chatId}`);
+      return;
+    }
 
     const past = history.get(chatId) || [];
     past.push({ role: "user", content: text });
